@@ -6,6 +6,14 @@
 namespace XmemoryPool
 {
     static const size_t SPAN_PAGES = 8;
+    CentralCache::CentralCache()
+    {
+        for (auto &ptr : centralFreeList)
+        {
+            ptr.store(nullptr, std::memory_order_relaxed);
+        }
+        // 互斥锁无需额外初始化
+    }
     // 从中心缓存获取内存块
     void *CentralCache::fetchRange(size_t index, size_t batchNum)
     {
@@ -13,11 +21,8 @@ namespace XmemoryPool
         if (index >= FREE_LIST_SIZE || batchNum == 0)
             return nullptr;
 
-        // 获取自旋锁 - 按照固定顺序获取锁以避免死锁
-        while (locks[index].test_and_set(std::memory_order_acquire))
-        {
-            std::this_thread::yield(); // 让出CPU
-        };
+        // 使用分段互斥锁保证线程安全
+        std::lock_guard<std::mutex> lock(getMutexForIndex(index));
 
         void *result = nullptr;
         try
@@ -26,24 +31,24 @@ namespace XmemoryPool
             result = centralFreeList[index].load(std::memory_order_relaxed);
             if (!result)
             {
+                // 如果没有空闲内存块，从PageCache获取
                 size_t size = (index + 1) * ALIGNMENT;
                 result = fetchFromPageCache(size);
 
                 if (!result)
                 {
-                    locks[index].clear(std::memory_order_release);
                     return nullptr;
                 }
 
-                // 将从PageCache获取的内存块切分层小块z
+                // 将从PageCache获取的内存块切分层小块
                 char *start = static_cast<char *>(result);
+                static const size_t SPAN_PAGES = 8;
                 size_t totalblocks = (SPAN_PAGES * PageCache::PAGE_SIZE) / size;
                 size_t allocateblocks = std::min(batchNum, totalblocks);
 
                 if (allocateblocks > 1)
                 {
-                    // 确保至少有两个块才构建链表
-                    //  构建留在PageCache的内存链表
+                    // 构建链表
                     for (size_t i = 1; i < allocateblocks; ++i)
                     {
                         void *current = start + (i - 1) * size;
@@ -94,10 +99,8 @@ namespace XmemoryPool
         }
         catch (...)
         {
-            locks[index].clear(std::memory_order_release);
             throw;
         }
-        locks[index].clear(std::memory_order_release);
         return result;
     };
 
@@ -109,20 +112,19 @@ namespace XmemoryPool
             return;
         }
 
-        while (locks[index].test_and_set(std::memory_order_acquire))
+        // 首先在无锁环境下计算链表长度和尾节点
+        void *end = start;
+        size_t count = 1;
+        while (*reinterpret_cast<void **>(end) != nullptr && count < size)
         {
-            std::this_thread::yield();
+            end = *(reinterpret_cast<void **>(end));
+            count++;
         }
+
+        // 然后再获取锁进行插入操作
+        std::lock_guard<std::mutex> lock(getMutexForIndex(index));
         try
         {
-            void *end = start;
-            size_t count = 1;
-            while (*reinterpret_cast<void **>(end) != nullptr && count < size)
-            {
-                end = *(reinterpret_cast<void **>(end));
-                count++;
-            }
-
             // 将归还的链表连接到中心缓存的链表头部
             void *current = centralFreeList[index].load(std::memory_order_relaxed);
             *(reinterpret_cast<void **>(end)) = current;
@@ -130,12 +132,9 @@ namespace XmemoryPool
         }
         catch (...)
         {
-            locks[index].clear(std::memory_order_release);
             throw;
         }
-        locks[index].clear(std::memory_order_release);
-    };
-
+    }
     void *CentralCache::fetchFromPageCache(size_t size)
     {
         // 计算实际需要的页数

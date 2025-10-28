@@ -68,6 +68,21 @@ namespace XmemoryPool
 
     void PageCache::deallocSpan(void *ptr, size_t numPages)
     {
+        // 对于小内存块（<=4页），直接free并清理spanMap
+        if (numPages <= 4)
+        {
+            // 从spanMap中删除对应的条目
+            auto it = spanMap.find(ptr);
+            if (it != spanMap.end())
+            {
+                delete it->second; // 释放Span对象
+                spanMap.erase(it);
+            }
+            free(ptr);
+            return;
+        }
+
+        // 大内存块的原有处理逻辑
         std::lock_guard<std::mutex> lock(mtx);
 
         // 查找对应的span
@@ -77,7 +92,56 @@ namespace XmemoryPool
 
         Span *span = it->second;
 
-        // 尝试合并相邻的span
+        // 1. 尝试合并前一个相邻的span
+        void *prevAddr = static_cast<char *>(ptr) - PAGE_SIZE; // 前一个页的地址
+        auto prevIt = spanMap.find(prevAddr);
+        if (prevIt != spanMap.end())
+        {
+            Span *prevSpan = prevIt->second;
+            size_t prevNumPages = prevSpan->numPages;
+            void *prevStartAddr = prevSpan->pageAddr;
+
+            // 检查prevSpan是否是完整包含prevAddr的span
+            if (static_cast<char *>(prevStartAddr) + prevNumPages * PAGE_SIZE == prevAddr)
+            {
+                // 检查prevSpan是否在空闲链表中
+                auto &prevList = freeSpans[prevNumPages];
+                bool found = false;
+
+                if (prevList == prevSpan)
+                {
+                    prevList = prevSpan->next;
+                    found = true;
+                }
+                else if (prevList)
+                {
+                    Span *current = prevList;
+                    while (current->next)
+                    {
+                        if (current->next == prevSpan)
+                        {
+                            current->next = prevSpan->next;
+                            found = true;
+                            break;
+                        }
+                        current = current->next;
+                    }
+                }
+
+                if (found)
+                {
+                    // 合并前一个span和当前span
+                    prevSpan->numPages += span->numPages;
+                    spanMap.erase(ptr);
+                    // 更新span到当前处理的是prevSpan
+                    ptr = prevSpan->pageAddr;
+                    delete span;
+                    span = prevSpan;
+                }
+            }
+        }
+
+        // 2. 尝试合并下一个相邻的span
         void *nextAddr = static_cast<char *>(ptr) + span->numPages * PAGE_SIZE;
         auto nextIt = spanMap.find(nextAddr);
         if (nextIt != spanMap.end())
@@ -117,6 +181,11 @@ namespace XmemoryPool
                 delete nextSpan;
             }
         }
+
+        // 3. 更新spanMap，确保映射正确
+        spanMap[ptr] = span;
+
+        // 4. 将合并后的span添加到对应的空闲链表
         auto &list = freeSpans[span->numPages];
         span->next = list;
         list = span;
@@ -124,13 +193,22 @@ namespace XmemoryPool
 
     void *PageCache::systemAlloc(size_t numPages)
     {
-        // 计算实际需要的字节数
         size_t size = numPages * PAGE_SIZE;
 
+        // 对于小内存块（<=4页），使用malloc而不是mmap
+        if (numPages <= 4)
+        {
+            return malloc(size);
+        }
+
+        // 大内存块仍然使用mmap
         void *ptr = mmap(nullptr, size, PROT_READ | PROT_WRITE,
                          MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
         if (ptr == MAP_FAILED)
-            return nullptr;
+        {
+            // mmap失败时回退到malloc
+            return malloc(size);
+        }
         memset(ptr, 0, size);
         return ptr;
     }

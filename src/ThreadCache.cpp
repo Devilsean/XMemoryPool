@@ -57,8 +57,16 @@ namespace XmemoryPool
 
     bool ThreadCache::shouldReturnToCentralCache(size_t index)
     {
-        // 设定阈值，当链表超过一定长度时归还给中心缓存
-        size_t threshold = 64;
+        size_t size = (index + 1) * ALIGNMENT;
+        size_t threshold;
+
+        if (size <= 64)       // 小对象
+            threshold = 512;  // 从128大幅提高到512
+        else if (size <= 256) // 中等对象
+            threshold = 256;  // 从64提高到256
+        else                  // 较大对象
+            threshold = 128;  // 从32提高到128
+
         return freeListSize[index] > threshold;
     }
 
@@ -92,6 +100,15 @@ namespace XmemoryPool
 
         // 获取对齐后的实际块大小
         size_t alignedSize = SizeClass::roundUp(size);
+        size_t keepRatio = 4; // 保留1/4的内存块在ThreadCache中
+        if (alignedSize <= 64)
+        {
+            keepRatio = 2; // 小对象保留更多
+        }
+        else if (alignedSize >= 1024)
+        {
+            keepRatio = 8; // 大对象保留更少
+        }
 
         // 计算要归还内存块数量
         size_t batchNum = freeListSize[index];
@@ -99,7 +116,7 @@ namespace XmemoryPool
             return; // 如果只有一个块，则不归还
 
         // 保留一部分在ThreadCache中（比如保留1/4）
-        size_t keepNum = std::max(batchNum / 4, size_t(1));
+        size_t keepNum = std::max(batchNum / keepRatio, size_t(1));
         size_t returnNum = batchNum - keepNum;
 
         // 将内存块串成链表
@@ -137,30 +154,29 @@ namespace XmemoryPool
         }
     }
     // 计算获取批量数
+    // 修改ThreadCache::getBatchNum函数
     size_t ThreadCache::getBatchNum(size_t size)
     {
-        constexpr size_t MAX_BATCH_SIZE = 4 * 1024; // 最大批量大小为1MB
-        // 使用预定义的常量
+        constexpr size_t MAX_BATCH_SIZE = 16 * 1024; // 增加到16KB
         size_t batchNum;
-        // 计算需要规划的内存块
-        // 对于小对象，批量获取数量更多，减少从中心缓存的获取次数
+
+        // 大幅增加小对象的批量获取数量
         if (size <= 32)
-            batchNum = 64; // 增加批量获取数量
+            batchNum = 256; // 从64增加到256
         else if (size <= 64)
-            batchNum = 32; // 增加批量获取数量
+            batchNum = 128; // 从32增加到128
         else if (size <= 128)
-            batchNum = 16;
+            batchNum = 64; // 从16增加到64
         else if (size <= 256)
-            batchNum = 8;
+            batchNum = 32; // 从8增加到32
         else if (size <= 512)
-            batchNum = 4;
+            batchNum = 16; // 从4增加到16
         else if (size <= 1024)
-            batchNum = 2;
+            batchNum = 8; // 从2增加到8
         else
-            batchNum = 1;
+            batchNum = 4; // 从1增加到4
 
         size_t maxNum = std::max(size_t(1), MAX_BATCH_SIZE / size);
-
         return std::max(size_t(1), std::min(batchNum, maxNum));
     }
 }

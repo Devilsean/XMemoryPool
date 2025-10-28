@@ -9,7 +9,6 @@ namespace XmemoryPool
     // 当本地缓存不足时，调用 fetchFromCentralCache() 从中心缓存批量获取内存块
     // 当本地缓存过多时，调用 returnToCentralCache()将内存块归还给中心缓存
     // 管理每个自由链表的内存块数量统计（freeListSize_数组）
-    // 对小对象（<=64字节）使用专门的优化路径
     class ThreadCache
     {
     public:

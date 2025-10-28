@@ -2,13 +2,11 @@
 
 #include "Common.h"
 #include <mutex>
+#include <atomic>
 
 namespace XmemoryPool
 {
     // 作为全局单例，是中间层协调者，负责管理线程缓存中的内存块
-    // 维护以原子指针实现的自由链表数组
-    // 使用细粒度自旋锁保证线程安全，减少锁竞争
-    // 针对小对象使用更优化的策略
     class CentralCache
     {
     public:
@@ -25,24 +23,20 @@ namespace XmemoryPool
 
     private:
         // 设置为私有函数防止显式调用，保证中心缓存的单例模式
-        CentralCache()
-        {
-            for (auto &ptr : centralFreeList)
-            {                                                  // 初始化所有自由列表指针
-                ptr.store(nullptr, std::memory_order_relaxed); // 提高性能
-            }
-            for (auto &lock : locks)
-            { // 初始化所有自旋锁
-                lock.clear();
-            }
-        }
+        CentralCache();
         void *fetchFromPageCache(size_t size);
 
+        // 获取对应index的锁
+        std::mutex &getMutexForIndex(size_t index)
+        {
+            return mutexes[index % MUTEX_COUNT];
+        }
+
     private:
+        static constexpr size_t MUTEX_COUNT = 16; // 分段锁数量
         // 中心缓存的自由列表
         std::array<std::atomic<void *>, FREE_LIST_SIZE> centralFreeList;
-        // 用于同步的自旋锁
-        std::array<std::atomic_flag, FREE_LIST_SIZE> locks;
-        // 用于批量操作的自旋锁，减少锁竞争
+        // 使用分段互斥锁替代自旋锁
+        std::array<std::mutex, MUTEX_COUNT> mutexes;
     };
 }
