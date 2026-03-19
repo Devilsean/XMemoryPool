@@ -24,85 +24,75 @@ namespace XmemoryPool
         // 使用分段互斥锁保证线程安全
         std::lock_guard<std::mutex> lock(getMutexForIndex(index));
 
-        void *result = nullptr;
-        try
+        void *result = centralFreeList[index].load(std::memory_order_relaxed);
+        
+        if (!result)
         {
-            // 尝试从中心缓存获取内存块
-            result = centralFreeList[index].load(std::memory_order_relaxed);
+            // 从PageCache获取
+            size_t size = (index + 1) * ALIGNMENT;
+            result = fetchFromPageCache(size);
+
             if (!result)
             {
-                // 如果没有空闲内存块，从PageCache获取
-                size_t size = (index + 1) * ALIGNMENT;
-                result = fetchFromPageCache(size);
-
-                if (!result)
-                {
-                    return nullptr;
-                }
-
-                // 将从PageCache获取的内存块切分层小块
-                char *start = static_cast<char *>(result);
-                static const size_t SPAN_PAGES = 8;
-                size_t totalblocks = (SPAN_PAGES * PageCache::PAGE_SIZE) / size;
-                size_t allocateblocks = std::min(batchNum, totalblocks);
-
-                if (allocateblocks > 1)
-                {
-                    // 构建链表
-                    for (size_t i = 1; i < allocateblocks; ++i)
-                    {
-                        void *current = start + (i - 1) * size;
-                        void *next = start + i * size;
-                        *reinterpret_cast<void **>(current) = next;
-                    }
-                    // 设置最后一个节点的next为nullptr
-                    *(reinterpret_cast<void **>(start + (allocateblocks - 1) * size)) = nullptr;
-                }
-                // 构建留在CentralCache的内存链表
-                if (totalblocks > allocateblocks)
-                {
-                    void *remainStart = start + allocateblocks * size;
-                    for (size_t i = allocateblocks + 1; i < totalblocks; ++i)
-                    {
-                        void *current = start + (i - 1) * size;
-                        void *next = start + i * size;
-                        *reinterpret_cast<void **>(current) = next;
-                    }
-                    *(reinterpret_cast<void **>(start + (totalblocks - 1) * size)) = nullptr;
-
-                    centralFreeList[index].store(remainStart, std::memory_order_release);
-                }
+                return nullptr;
             }
-            else // 如果中心缓存有index对应的内存块
+
+            // 切分内存块
+            char *start = static_cast<char *>(result);
+            static const size_t SPAN_PAGES = 8;
+            size_t totalblocks = (SPAN_PAGES * PageCache::PAGE_SIZE) / size;
+            size_t allocateblocks = std::min(batchNum, totalblocks);
+
+            if (allocateblocks > 1)
             {
-                void *current = result;
-                void *prev = nullptr;
-                size_t count = 0;
-
-                // 遍历链表，找到batchNum个节点
-                while (current && count < batchNum)
+                // 构建返回的链表
+                for (size_t i = 1; i < allocateblocks; ++i)
                 {
-                    prev = current;
-                    current = *(reinterpret_cast<void **>(current));
-                    count++;
+                    void *current = start + (i - 1) * size;
+                    void *next = start + i * size;
+                    *reinterpret_cast<void **>(current) = next;
                 }
-
-                // 断开链表
-                if (prev)
+                *(reinterpret_cast<void **>(start + (allocateblocks - 1) * size)) = nullptr;
+            }
+            
+            // 构建留在CentralCache的链表
+            if (totalblocks > allocateblocks)
+            {
+                void *remainStart = start + allocateblocks * size;
+                for (size_t i = allocateblocks + 1; i < totalblocks; ++i)
                 {
-                    *(reinterpret_cast<void **>(prev)) = nullptr;
+                    void *current = start + (i - 1) * size;
+                    void *next = start + i * size;
+                    *reinterpret_cast<void **>(current) = next;
                 }
-
-                // 更新中心缓存的链表头
-                centralFreeList[index].store(current, std::memory_order_release);
+                *(reinterpret_cast<void **>(start + (totalblocks - 1) * size)) = nullptr;
+                centralFreeList[index].store(remainStart, std::memory_order_release);
             }
         }
-        catch (...)
+        else
         {
-            throw;
+            // 从现有链表中取出batchNum个节点
+            void *current = result;
+            void *prev = nullptr;
+            size_t count = 0;
+
+            while (current && count < batchNum)
+            {
+                prev = current;
+                current = *(reinterpret_cast<void **>(current));
+                count++;
+            }
+
+            if (prev)
+            {
+                *(reinterpret_cast<void **>(prev)) = nullptr;
+            }
+
+            centralFreeList[index].store(current, std::memory_order_release);
         }
+        
         return result;
-    };
+    }
 
     // 将内存块归还到中心缓存
     void CentralCache::returnRange(void *start, size_t size, size_t index)
@@ -119,7 +109,7 @@ namespace XmemoryPool
         {
             end = *(reinterpret_cast<void **>(end));
             count++;
-        }
+        } 
 
         // 然后再获取锁进行插入操作
         std::lock_guard<std::mutex> lock(getMutexForIndex(index));
@@ -141,13 +131,21 @@ namespace XmemoryPool
         size_t numPages = (size + PageCache::PAGE_SIZE - 1) / PageCache::PAGE_SIZE;
 
         // 根据内存大小确定申请策略
+        Span* span = nullptr;
         if (size > SPAN_PAGES * PageCache::PAGE_SIZE)
         {
-            return PageCache::getInstance().allocspan(numPages);
+            span = PageCache::getInstance().allocSpan(numPages);
         }
         else
         {
-            return PageCache::getInstance().allocspan(SPAN_PAGES);
+            span = PageCache::getInstance().allocSpan(SPAN_PAGES);
         }
+        
+        // 将Span转换为实际的内存地址
+        if (span)
+        {
+            return (void*)(span->pageId << PageCache::PAGE_SHIFT);
+        }
+        return nullptr;
     };
 }

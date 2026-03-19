@@ -32,7 +32,7 @@ namespace XmemoryPool
         // 判断是否应该归还到中心缓存
         bool shouldReturnToCentralCache(size_t index);
 
-        std::array<void *, FREE_LIST_SIZE> freeList;     // 自由链表数组，每个元素是一个指针，指向一个内存块
-        std::array<size_t, FREE_LIST_SIZE> freeListSize; // 每个自由链表中内存块的数量
+        std::array<void *, FREE_LIST_SIZE> freeList{};     // 自由链表数组，每个元素是一个指针，指向一个内存块
+        std::array<size_t, FREE_LIST_SIZE> freeListSize{}; // 每个自由链表中内存块的数量
     };
 }

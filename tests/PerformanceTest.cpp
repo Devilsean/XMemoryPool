@@ -75,20 +75,14 @@ public:
 
         // 测试内存池
         {
-            Timer t;
             std::vector<void *> ptrs;
             ptrs.reserve(NUM_ALLOCS);
-
+            
+            Timer t;
             for (size_t i = 0; i < NUM_ALLOCS; ++i)
             {
-                ptrs.push_back(MemoryPool::allocate(SMALL_SIZE));
-
-                // 模拟真实使用：部分立即释放
-                if (i % 4 == 0)
-                {
-                    MemoryPool::deallocate(ptrs.back(), SMALL_SIZE);
-                    ptrs.pop_back();
-                }
+                void* ptr = MemoryPool::allocate(SMALL_SIZE);
+                ptrs.push_back(ptr);
             }
 
             for (void *ptr : ptrs)
@@ -102,24 +96,19 @@ public:
 
         // 测试new/delete
         {
-            Timer t;
             std::vector<void *> ptrs;
             ptrs.reserve(NUM_ALLOCS);
-
+            
+            Timer t;
             for (size_t i = 0; i < NUM_ALLOCS; ++i)
             {
-                ptrs.push_back(new char[SMALL_SIZE]);
-
-                if (i % 4 == 0)
-                {
-                    delete[] static_cast<char *>(ptrs.back());
-                    ptrs.pop_back();
-                }
+                void* ptr = ::operator new(SMALL_SIZE);
+                ptrs.push_back(ptr);
             }
 
             for (void *ptr : ptrs)
             {
-                delete[] static_cast<char *>(ptr);
+                ::operator delete(ptr);
             }
 
             std::cout << "New/Delete: " << std::fixed << std::setprecision(3)

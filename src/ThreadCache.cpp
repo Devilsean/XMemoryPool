@@ -5,54 +5,76 @@ namespace XmemoryPool
 {
     void *ThreadCache::allocate(size_t size)
     {
-        // 处理0字节的分配情况
+        // 快速路径：内联常见情况，减少分支
+        if (size <= MAX_BYTES && size > 0)
+        {
+            // 获取索引 - 内联计算
+            size_t index = ((size + ALIGNMENT - 1) >> ALIGN_SHIFT) - 1;
+
+            // 快速路径：直接从本地缓存分配
+            void *ptr = freeList[index];
+            if (ptr)
+            {
+                freeList[index] = *(reinterpret_cast<void **>(ptr));
+                freeListSize[index]--;
+                return ptr;
+            }
+            // 慢速路径：从中心缓存获取
+            return fetchFromCentralCache(index);
+        }
+
+        // 边界情况处理
         if (size == 0)
         {
             size = ALIGNMENT;
+            void *ptr = freeList[0];
+            if (ptr)
+            {
+                freeList[0] = *(reinterpret_cast<void **>(ptr));
+                freeListSize[0]--;
+                return ptr;
+            }
+            return fetchFromCentralCache(0);
         }
 
-        // 如果大于最大值，直接调用malloc
-        if (size > MAX_BYTES)
-        {
-            return malloc(size);
-        }
-
-        // 获取索引
-        size_t index = SizeClass::getIndex(size);
-        // 更新自由链表大小
-        freeListSize[index]--;
-
-        // 如果有空闲内存块，直接返回头指针
-        if (void *ptr = freeList[index])
-        {
-            freeList[index] = *(reinterpret_cast<void **>(ptr));
-            return ptr;
-        }
-        // 如果没有空闲内存块，则从中心缓存中获取
-        return fetchFromCentralCache(index);
+        // 大对象直接使用系统分配
+        return malloc(size);
     }
 
     void ThreadCache::deallocate(void *ptr, size_t size)
     {
+        // 大对象直接释放
         if (size > MAX_BYTES)
         {
             free(ptr);
             return;
         }
 
-        size_t index = SizeClass::getIndex(size);
+        // 快速路径：内联常见情况
+        if (size > 0)
+        {
+            // 内联索引计算
+            size_t index = ((size + ALIGNMENT - 1) >> ALIGN_SHIFT) - 1;
 
-        // 插入到线程本地自由链表
+            // 快速插入到自由链表头部
+            *(reinterpret_cast<void **>(ptr)) = freeList[index];
+            freeList[index] = ptr;
+            
+            size_t newSize = ++freeListSize[index];
+
+            // 延迟归还检查 - 使用更高的阈值减少归还频率
+            if (newSize > 512)  // 统一使用更高的阈值
+            {
+                returnToCentralCache(freeList[index], size);
+            }
+            return;
+        }
+
+        // size == 0的情况，按ALIGNMENT处理
+        size_t index = 0;
         *(reinterpret_cast<void **>(ptr)) = freeList[index];
         freeList[index] = ptr;
-
-        // 更新自由链表大小
         freeListSize[index]++;
-
-        if (shouldReturnToCentralCache(index))
-        {
-            returnToCentralCache(freeList[index], size);
-        }
     }
 
     bool ThreadCache::shouldReturnToCentralCache(size_t index)
@@ -72,7 +94,7 @@ namespace XmemoryPool
 
     void *ThreadCache::fetchFromCentralCache(size_t index)
     {
-        // 计算字节数 - 修复：使用SizeClass::roundUp计算实际大小
+        // 计算字节数
         size_t size = (index + 1) * ALIGNMENT;
         // 计算批量数量
         size_t batchNum = getBatchNum(size);
@@ -82,101 +104,87 @@ namespace XmemoryPool
         {
             return nullptr;
         }
-        // 更新自由链表大小
-        freeListSize[index] += batchNum;
-        // 取一个返回，其余放入线程本地自由链表
+        
+        // 取第一个返回，其余放入自由链表
         void *result = start;
-        if (batchNum > 1)
+        void *next = *(reinterpret_cast<void **>(start));
+        
+        if (next)
         {
-            freeList[index] = *(reinterpret_cast<void **>(start));
+            freeList[index] = next;
+            freeListSize[index] = batchNum - 1;
         }
+        else
+        {
+            freeListSize[index] = 0;
+        }
+        
         return result;
     }
 
     void ThreadCache::returnToCentralCache(void *start, size_t size)
     {
+        if (!start) return;
+        
         // 根据大小计算对应的索引
         size_t index = SizeClass::getIndex(size);
 
         // 获取对齐后的实际块大小
         size_t alignedSize = SizeClass::roundUp(size);
-        size_t keepRatio = 4; // 保留1/4的内存块在ThreadCache中
-        if (alignedSize <= 64)
-        {
-            keepRatio = 2; // 小对象保留更多
-        }
-        else if (alignedSize >= 1024)
-        {
-            keepRatio = 8; // 大对象保留更少
-        }
-
+        
         // 计算要归还内存块数量
-        size_t batchNum = freeListSize[index];
-        if (batchNum <= 1)
+        size_t totalNum = freeListSize[index];
+        if (totalNum <= 1)
             return; // 如果只有一个块，则不归还
 
-        // 保留一部分在ThreadCache中（比如保留1/4）
-        size_t keepNum = std::max(batchNum / keepRatio, size_t(1));
-        size_t returnNum = batchNum - keepNum;
+        // 保留一半在ThreadCache中
+        size_t keepNum = totalNum / 2;
+        if (keepNum == 0) keepNum = 1;
+        size_t returnNum = totalNum - keepNum;
 
-        // 将内存块串成链表
-        char *current = static_cast<char *>(start);
-        // 使用对齐后的大小计算分割点
-        char *splitNode = current;
-        for (size_t i = 0; i < keepNum - 1; ++i)
+        if (returnNum == 0) return;
+
+        // 遍历链表找到分割点
+        void *current = start;
+        void *splitNode = nullptr;
+        
+        for (size_t i = 0; i < keepNum && current != nullptr; ++i)
         {
-            splitNode = reinterpret_cast<char *>(*reinterpret_cast<void **>(splitNode));
-            if (splitNode == nullptr)
-            {
-                // 如果链表提前结束，更新实际的返回数量
-                returnNum = batchNum - (i + 1);
-                break;
-            }
+            splitNode = current;
+            current = *reinterpret_cast<void **>(current);
         }
 
-        if (splitNode != nullptr)
+        if (splitNode != nullptr && current != nullptr)
         {
-            // 将要返回的部分和要保留的部分断开
-            void *nextNode = *reinterpret_cast<void **>(splitNode);
-            *reinterpret_cast<void **>(splitNode) = nullptr; // 断开连接
+            // 断开链表
+            *reinterpret_cast<void **>(splitNode) = nullptr;
 
-            // 更新ThreadCache的空闲链表
+            // 更新ThreadCache的空闲链表（保留前半部分）
             freeList[index] = start;
-
-            // 更新自由链表大小
             freeListSize[index] = keepNum;
 
-            // 将剩余部分返回给CentralCache
-            if (returnNum > 0 && nextNode != nullptr)
-            {
-                CentralCache::getInstance().returnRange(nextNode, returnNum * alignedSize, index);
-            }
+            // 将后半部分返回给CentralCache
+            CentralCache::getInstance().returnRange(current, returnNum * alignedSize, index);
         }
     }
     // 计算获取批量数
     // 修改ThreadCache::getBatchNum函数
     size_t ThreadCache::getBatchNum(size_t size)
     {
-        constexpr size_t MAX_BATCH_SIZE = 16 * 1024; // 增加到16KB
-        size_t batchNum;
-
-        // 大幅增加小对象的批量获取数量
+        // 优化批量获取策略 - 减少从CentralCache获取的频率
         if (size <= 32)
-            batchNum = 256; // 从64增加到256
+            return 128;
         else if (size <= 64)
-            batchNum = 128; // 从32增加到128
+            return 64;
         else if (size <= 128)
-            batchNum = 64; // 从16增加到64
+            return 32;
         else if (size <= 256)
-            batchNum = 32; // 从8增加到32
+            return 16;
         else if (size <= 512)
-            batchNum = 16; // 从4增加到16
+            return 8;
         else if (size <= 1024)
-            batchNum = 8; // 从2增加到8
+            return 4;
         else
-            batchNum = 4; // 从1增加到4
-
-        size_t maxNum = std::max(size_t(1), MAX_BATCH_SIZE / size);
-        return std::max(size_t(1), std::min(batchNum, maxNum));
+            return 2;
     }
 }
