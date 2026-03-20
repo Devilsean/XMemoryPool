@@ -63,7 +63,7 @@ namespace XmemoryPool
             size_t newSize = ++freeListSize[index];
 
             // 延迟归还检查 - 使用更高的阈值减少归还频率
-            if (newSize > 512)  // 统一使用更高的阈值
+            if (newSize >= maxSize[index]*2)  // 自适应最大容量
             {
                 returnToCentralCache(freeList[index], size);
             }
@@ -97,7 +97,12 @@ namespace XmemoryPool
         // 计算字节数
         size_t size = (index + 1) * ALIGNMENT;
         // 计算批量数量
-        size_t batchNum = getBatchNum(size);
+        size_t batchNum = maxSize[index];
+        // 慢启动：每次Miss，下一次申请的数量就多一点
+        if (maxSize[index] < getBatchNum(size)) {
+            maxSize[index]+=2;
+        }
+
         // 从中心缓存中获取内存块
         void *start = CentralCache::getInstance().fetchRange(index, batchNum);
         if (!start)
@@ -125,48 +130,56 @@ namespace XmemoryPool
     void ThreadCache::returnToCentralCache(void *start, size_t size)
     {
         if (!start) return;
-        
-        // 根据大小计算对应的索引
+
+        // 1. 基本参数计算
         size_t index = SizeClass::getIndex(size);
-
-        // 获取对齐后的实际块大小
-        size_t alignedSize = SizeClass::roundUp(size);
-        
-        // 计算要归还内存块数量
         size_t totalNum = freeListSize[index];
-        if (totalNum <= 1)
-            return; // 如果只有一个块，则不归还
+        
+        // 如果数量太少（比如只有1个），没必要归还，直接挂回 ThreadCache 即可
+        if (totalNum <= 1) return;
 
-        // 保留一半在ThreadCache中
         size_t keepNum = totalNum / 2;
         if (keepNum == 0) keepNum = 1;
         size_t returnNum = totalNum - keepNum;
 
-        if (returnNum == 0) return;
-
-        // 遍历链表找到分割点
-        void *current = start;
-        void *splitNode = nullptr;
-        
-        for (size_t i = 0; i < keepNum && current != nullptr; ++i)
+        // 2. 寻找 ThreadCache 留下的最后一个节点 (splitNode)
+        // 这里的 start 就是当前 ThreadCache 链表的头
+        void *splitNode = start;
+        for (size_t i = 0; i < keepNum - 1 && splitNode != nullptr; ++i)
         {
-            splitNode = current;
-            current = *reinterpret_cast<void **>(current);
+            splitNode = *(reinterpret_cast<void **>(splitNode));
         }
 
-        if (splitNode != nullptr && current != nullptr)
+        if (splitNode != nullptr)
         {
-            // 断开链表
-            *reinterpret_cast<void **>(splitNode) = nullptr;
+            // 3. 确定要归还给 CentralCache 的起始点 (actualReturnStart)
+            void *actualReturnStart = *(reinterpret_cast<void **>(splitNode));
+            
+            if (actualReturnStart != nullptr)
+            {
+                // 4. 寻找归还链表的终点 (actualReturnEnd)
+                // 这一步是为了让 CentralCache 能够 O(1) 挂载，不用再遍历一遍
+                void *actualReturnEnd = actualReturnStart;
+                for (size_t i = 0; i < returnNum - 1 && actualReturnEnd != nullptr; ++i)
+                {
+                    actualReturnEnd = *(reinterpret_cast<void **>(actualReturnEnd));
+                }
 
-            // 更新ThreadCache的空闲链表（保留前半部分）
-            freeList[index] = start;
-            freeListSize[index] = keepNum;
+                // 5. 物理断开链表
+                // splitNode 之后的部分被切断，归还给 CentralCache
+                *(reinterpret_cast<void **>(splitNode)) = nullptr;
 
-            // 将后半部分返回给CentralCache
-            CentralCache::getInstance().returnRange(current, returnNum * alignedSize, index);
+                // 6. 更新 ThreadCache 状态
+                freeList[index] = start; // 剩下的前半部分
+                freeListSize[index] = keepNum;
+
+                // 7. 移交给 CentralCache
+                // 加上 actualReturnEnd 提速
+                CentralCache::getInstance().returnRange(actualReturnStart, actualReturnEnd, index);
+            }
         }
     }
+
     // 计算获取批量数
     // 修改ThreadCache::getBatchNum函数
     size_t ThreadCache::getBatchNum(size_t size)

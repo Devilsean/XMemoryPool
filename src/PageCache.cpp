@@ -161,7 +161,11 @@ namespace XmemoryPool
             // mmap失败时回退到malloc
             return malloc(size);
         }
-        memset(ptr, 0, size);
+
+        // 消除冗余的 memset：在 systemAlloc 中，
+        // mmap 拿到的内存不需要手动清零，这在频繁申请大块内存时开销极大。
+        // memset(ptr, 0, size);
+        
         return ptr;
     }
     

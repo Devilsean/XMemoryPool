@@ -15,6 +15,12 @@ namespace XmemoryPool
         static ThreadCache *getInstance() // 声明为静态函数，保证线程缓存的单例模式
         {
             static thread_local ThreadCache instance;
+            static thread_local bool initialized = false;
+  
+            if (!initialized) {
+              initialized = true;
+              instance.maxSize.fill(8);
+            }
             return &instance;
         }
 
@@ -34,5 +40,6 @@ namespace XmemoryPool
 
         std::array<void *, FREE_LIST_SIZE> freeList{};     // 自由链表数组，每个元素是一个指针，指向一个内存块
         std::array<size_t, FREE_LIST_SIZE> freeListSize{}; // 每个自由链表中内存块的数量
+        std::array<size_t, FREE_LIST_SIZE> maxSize{}; // 每个桶当前的自适应最大容量
     };
 }
