@@ -1,5 +1,6 @@
 #pragma once
 #include <cstring>
+#include <cstdlib>
 
 template <int BITS>
 class RadixTree {
@@ -39,7 +40,7 @@ public:
 
         if (root[i1] == nullptr) {
             // 只有用到这块内存时，才申请二级的空间（Lazy Allocation）
-            root[i1] = new LeafNode;
+            root[i1] = (LeafNode*)std::malloc(sizeof(LeafNode));
             memset(root[i1], 0, sizeof(LeafNode));
         }
         root[i1]->values[i2] = spanPtr;

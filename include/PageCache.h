@@ -20,13 +20,12 @@ namespace XmemoryPool
     class SpanList {
     public:
         SpanList() {
-            head = new Span;
+            head = (Span*)std::malloc(sizeof(Span));
             head->next = head;
             head->prev = head;
         }
         // 需要实现 PushFront, PopFront, Erase 等操作
         void PushFront(Span* span) {
-            std::lock_guard<std::mutex> lock(mtx);
             if (!span) return;
             Span* first = head->next;
             head->next = span;
@@ -36,7 +35,6 @@ namespace XmemoryPool
         }
         
         Span* PopFront() {
-            std::lock_guard<std::mutex> lock(mtx);
             if (head->next == head) {
                 return nullptr;
             }
@@ -48,7 +46,6 @@ namespace XmemoryPool
         }
         
         void Erase(Span* span) {
-            std::lock_guard<std::mutex> lock(mtx);
             if (!span || !span->prev || !span->next) return;
             span->prev->next = span->next;
             span->next->prev = span->prev;
@@ -56,12 +53,10 @@ namespace XmemoryPool
         }
         
         bool Empty() {
-            std::lock_guard<std::mutex> lock(mtx);
             return head->next == head;
         }
     private:
         Span* head;
-        std::mutex mtx; // 桶锁
     };
 
     class PageCache

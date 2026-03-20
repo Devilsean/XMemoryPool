@@ -9,67 +9,78 @@ namespace XmemoryPool
 
     // 从页面缓存中分配指定页数的内存空间
     Span* PageCache::allocSpan(size_t numPages) {
+        std::lock_guard<std::mutex> lock(pageMtx); // 锁只在入口处拿一次
         size_t k = numPages;
-        // 1. 如果申请页数超过 128 页，直接走系统分配
-        if (k > MAX_PAGES - 1) {
-            void* ptr = systemAlloc(k);
-            Span* span = new Span;
-            span->pageId = (size_t)ptr >> PAGE_SHIFT;
-            span->numPages = k;
-            idSpanMap.set(span->pageId, span); // 记录起始页即可
-            return span;
-        }
 
-        // 2. 检查对应页数的桶里有没有现成的
-        if (!spanLists[k].Empty()) {
-            Span* span = spanLists[k].PopFront();
-            span->inUse = true;
-            // 记得把这个 Span 管理的每一页都在基数树注册，方便以后合并
-            for (size_t i = 0; i < span->numPages; ++i)
-                idSpanMap.set(span->pageId + i, span);
-            return span;
-        }
-
-        // 3. 往后找更大的块进行切分
-        for (size_t i = k + 1; i < MAX_PAGES; ++i) {
-            if (!spanLists[i].Empty()) {
-                Span* bigSpan = spanLists[i].PopFront();
-                Span* kSpan = new Span; // 切出的前 k 页
-
-                kSpan->pageId = bigSpan->pageId;
-                kSpan->numPages = k;
-                kSpan->inUse = true;
-
-                // 剩下的部分
-                bigSpan->pageId += k;
-                bigSpan->numPages -= k;
-                // 把剩下的挂回它对应的桶（比如原 128 页，切 3 页，剩 125 页挂进 spanLists[125]）
-                spanLists[bigSpan->numPages].PushFront(bigSpan);
-                
-                // 存储映射关系：bigSpan 的起始页和结尾页一定要映射，方便合并找邻居
-                idSpanMap.set(bigSpan->pageId, bigSpan);
-                idSpanMap.set(bigSpan->pageId + bigSpan->numPages - 1, bigSpan);
-
-                // 给用户的 kSpan 每一页都要建立映射
-                for (size_t j = 0; j < kSpan->numPages; ++j)
-                    idSpanMap.set(kSpan->pageId + j, kSpan);
-
-                return kSpan;
+        while (true) {
+            // 1. 如果申请页数超过限制，直接走系统分配
+            if (k >= MAX_PAGES) {
+                void* ptr = systemAlloc(k);
+                Span* span = (Span*)std::malloc(sizeof(Span)); // 使用 malloc 避开重写的 new
+                new(span) Span();
+                span->pageId = (size_t)ptr >> PAGE_SHIFT;
+                span->numPages = k;
+                span->inUse = true;
+                idSpanMap.set(span->pageId, span); 
+                return span;
             }
-        }
 
-        // 4. 全都找不到，向系统要个 128 页的巨头
-        void* ptr = systemAlloc(MAX_PAGES - 1);
-        Span* bigSpan = new Span;
-        bigSpan->pageId = (size_t)ptr >> PAGE_SHIFT;
-        bigSpan->numPages = MAX_PAGES - 1;
-        spanLists[bigSpan->numPages].PushFront(bigSpan);
-        
-        // 递归调用一次，现在肯定能切出来了
-        return allocSpan(k);
+            // 2. 检查对应页数的桶里有没有现成的
+            if (!spanLists[k].Empty()) {
+                Span* span = spanLists[k].PopFront();
+                span->inUse = true;
+                for (size_t i = 0; i < span->numPages; ++i)
+                    idSpanMap.set(span->pageId + i, span);
+                return span;
+            }
+
+            // 3. 往后找更大的块进行切分
+            for (size_t i = k + 1; i < MAX_PAGES; ++i) {
+                if (!spanLists[i].Empty()) {
+                    Span* bigSpan = spanLists[i].PopFront();
+                    Span* kSpan = (Span*)std::malloc(sizeof(Span)); // 避开 new
+                    new(kSpan) Span();
+
+                    kSpan->pageId = bigSpan->pageId;
+                    kSpan->numPages = k;
+                    kSpan->inUse = true;
+
+                    bigSpan->pageId += k;
+                    bigSpan->numPages -= k;
+                    spanLists[bigSpan->numPages].PushFront(bigSpan);
+                    
+                    idSpanMap.set(bigSpan->pageId, bigSpan);
+                    idSpanMap.set(bigSpan->pageId + bigSpan->numPages - 1, bigSpan);
+
+                    for (size_t j = 0; j < kSpan->numPages; ++j)
+                        idSpanMap.set(kSpan->pageId + j, kSpan);
+
+                    return kSpan;
+                }
+            }
+
+            // 4. 全都找不到，向系统要个 128 页的巨头
+            void* ptr = systemAlloc(MAX_PAGES - 1);
+            Span* bigSpan = (Span*)std::malloc(sizeof(Span)); // 避开 new
+            new(bigSpan) Span();
+            bigSpan->pageId = (size_t)ptr >> PAGE_SHIFT;
+            bigSpan->numPages = MAX_PAGES - 1;
+            bigSpan->inUse = false;
+            
+            // 挂载到 128 页的桶里
+            spanLists[bigSpan->numPages].PushFront(bigSpan);
+            
+            // 更新基数树映射，方便后续合并
+            idSpanMap.set(bigSpan->pageId, bigSpan);
+            idSpanMap.set(bigSpan->pageId + bigSpan->numPages - 1, bigSpan);
+
+            // 不再递归调用 allocSpan(k)，而是依靠 while(true) 进入下一轮循环
+            // 下一轮循环中，Step 2 必然能从 spanLists[128] 中拿到刚才申请的块
+        }
     }
 
-    void PageCache::deallocSpan(Span* span) {
+    void PageCache::deallocSpan(Span *span) {
+        std::lock_guard<std::mutex> lock(pageMtx);
         // 限制：PageCache 只合并管理 128 页以内的
         if (span->numPages >= MAX_PAGES) {
             void* ptr = (void*)(span->pageId << PAGE_SHIFT);
