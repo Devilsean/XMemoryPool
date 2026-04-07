@@ -1,67 +1,93 @@
 #pragma once
 #include <cstdlib>
 #include <cstring>
+#include <cstdint>
 
-template <int BITS = 20> class RadixTree {
+static const int RADIX_LEVELS = 4;
+static const int BITS_PER_LEVEL = 13;
+static const int RADIX_SIZE = 1 << BITS_PER_LEVEL;
+static const int RADIX_MASK = RADIX_SIZE - 1;
+
+template <int MAX_BITS = 52> class RadixTree {
 private:
-  // 假设 BITS = 20 (对于 32 位系统，4KB 页)
-  // 一级用 10 位，二级用 10 位
-  static const int INTER_BITS = 10;
-  static const int INTER_SIZE = 1 << INTER_BITS; // 1024
-
-  static const int LEAF_BITS = BITS - INTER_BITS;
-  static const int LEAF_SIZE = 1 << LEAF_BITS; // 1024
-
-  struct LeafNode {
-    void *values[LEAF_SIZE]; // 存储 Span* 指针
+  struct Node {
+    void *children[RADIX_SIZE];
   };
 
-  LeafNode *root[INTER_SIZE]; // 一级数组，存放指向二级节点的指针
+  Node *root;
+
+  inline Node* allocNode() {
+    Node *node = (Node *)std::malloc(sizeof(Node));
+    if (node) {
+      memset(node, 0, sizeof(Node));
+    }
+    return node;
+  }
 
 public:
-  RadixTree() { memset(root, 0, sizeof(root)); }
+  RadixTree() { root = allocNode(); }
 
   ~RadixTree() {
-    for (int i = 0; i < INTER_SIZE; ++i) {
-      if (root[i] != nullptr) {
-        std::free(root[i]);
-        root[i] = nullptr;
+    freeRecursive(root, 0);
+  }
+
+  void freeRecursive(Node *node, int level) {
+    if (!node) return;
+    if (level < RADIX_LEVELS - 1) {
+      for (int i = 0; i < RADIX_SIZE; ++i) {
+        if (node->children[i]) {
+          freeRecursive((Node *)node->children[i], level + 1);
+        }
       }
     }
+    std::free(node);
   }
 
-  // 获取页号对应的 Span
   inline void *get(size_t pageId) const {
-    size_t i1 = pageId >> LEAF_BITS;      // 高 10 位
-    size_t i2 = pageId & (LEAF_SIZE - 1); // 低 10 位
+    Node *cur = root;
+    if (!cur) return nullptr;
 
-    if (i1 >= INTER_SIZE || root[i1] == nullptr)
-      return nullptr;
-    return root[i1]->values[i2];
+    for (int level = 0; level < RADIX_LEVELS; ++level) {
+      size_t idx = (pageId >> (BITS_PER_LEVEL * (RADIX_LEVELS - 1 - level))) & RADIX_MASK;
+      if (level == RADIX_LEVELS - 1) {
+        return cur->children[idx];
+      }
+      cur = (Node *)cur->children[idx];
+      if (!cur) return nullptr;
+    }
+
+    return nullptr;
   }
 
-  // 建立页号到 Span 的映射
   inline void set(size_t pageId, void *spanPtr) {
-    size_t i1 = pageId >> LEAF_BITS;
-    if (i1 >= INTER_SIZE) {
-      return;
-    }
-    size_t i2 = pageId & (LEAF_SIZE - 1);
+    Node *cur = root;
 
-    if (root[i1] == nullptr) {
-      // 只有用到这块内存时，才申请二级的空间（Lazy Allocation）
-      root[i1] = (LeafNode *)std::malloc(sizeof(LeafNode));
-      memset(root[i1], 0, sizeof(LeafNode));
+    for (int level = 0; level < RADIX_LEVELS - 1; ++level) {
+      size_t idx = (pageId >> (BITS_PER_LEVEL * (RADIX_LEVELS - 1 - level))) & RADIX_MASK;
+
+      if (cur->children[idx] == nullptr) {
+        cur->children[idx] = allocNode();
+        if (!cur->children[idx]) return;
+      }
+      cur = (Node *)cur->children[idx];
     }
-    root[i1]->values[i2] = spanPtr;
+
+    size_t idx = pageId & RADIX_MASK;
+    cur->children[idx] = spanPtr;
   }
 
-  // 删除页号对应的映射
-  void erase(size_t pageId) {
-    size_t i1 = pageId >> LEAF_BITS;
-    size_t i2 = pageId & (LEAF_SIZE - 1);
-    if (i1 < INTER_SIZE && root[i1] != nullptr) {
-      root[i1]->values[i2] = nullptr;
+  inline void erase(size_t pageId) {
+    Node *cur = root;
+    if (!cur) return;
+
+    for (int level = 0; level < RADIX_LEVELS; ++level) {
+      size_t idx = (pageId >> (BITS_PER_LEVEL * (RADIX_LEVELS - 1 - level))) & RADIX_MASK;
+      if (level == RADIX_LEVELS - 1) {
+        cur->children[idx] = nullptr;
+        return;
+      }
+      cur = (Node *)cur->children[idx];
+      if (!cur) return;
     }
   }
 };

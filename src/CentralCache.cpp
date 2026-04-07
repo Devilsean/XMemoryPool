@@ -7,7 +7,7 @@ namespace XmemoryPool {
 static const size_t SPAN_PAGES = 8;
 CentralCache::CentralCache() {
   for (auto &ptr : centralFreeList) {
-    ptr.store(nullptr, std::memory_order_relaxed);
+    ptr.head.store(nullptr, std::memory_order_relaxed);
   }
   // 互斥锁无需额外初始化
 }
@@ -19,7 +19,7 @@ void *CentralCache::fetchRange(size_t index, size_t batchNum) {
   std::unique_lock<std::mutex> lock(getMutexForIndex(index));
 
   // 桶里有现成的内存块
-  void *result = centralFreeList[index].load(std::memory_order_relaxed);
+  void *result = centralFreeList[index].head.load(std::memory_order_relaxed);
   if (result) {
     void *current = result;
     void *prev = nullptr;
@@ -35,7 +35,7 @@ void *CentralCache::fetchRange(size_t index, size_t batchNum) {
     // 断开取走的这部分链表，并更新桶头
     if (prev)
       *(reinterpret_cast<void **>(prev)) = nullptr;
-    centralFreeList[index].store(current, std::memory_order_release);
+    centralFreeList[index].head.store(current, std::memory_order_release);
     return result;
   }
 
@@ -95,12 +95,12 @@ void *CentralCache::fetchRange(size_t index, size_t batchNum) {
 
   // 挂回剩余部分：直接连在当前桶的最前面
   if (remainStart) {
-    void *oldHead = centralFreeList[index].load(std::memory_order_relaxed);
+    void *oldHead = centralFreeList[index].head.load(std::memory_order_relaxed);
     // 这里要注意：remainStart 链表的末尾是之前的 cur，它已经封口了
     // 如果要把 remainStart 这一串挂上去，应该是：
     // 把 cur 指向 oldHead，把 remainStart 设为新 head
     *(reinterpret_cast<void **>(cur)) = oldHead;
-    centralFreeList[index].store(remainStart, std::memory_order_release);
+    centralFreeList[index].head.store(remainStart, std::memory_order_release);
   }
 
   return actualResult;
@@ -116,14 +116,14 @@ void CentralCache::returnRange(void *start, void *end, size_t index) {
 
   // O(1) 挂载逻辑
   // 先取出桶里原来的头节点
-  void *oldHead = centralFreeList[index].load(std::memory_order_relaxed);
+  void *oldHead = centralFreeList[index].head.load(std::memory_order_relaxed);
 
   // 把归还链表的最后一个节点的 next 指向原来的头
   *(reinterpret_cast<void **>(end)) = oldHead;
 
   // 更新桶的头节点为归还链表的起始点
   // 使用 release 语义确保之前的写入对其他线程可见
-  centralFreeList[index].store(start, std::memory_order_release);
+  centralFreeList[index].head.store(start, std::memory_order_release);
 }
 
 void *CentralCache::fetchFromPageCache(size_t size) {

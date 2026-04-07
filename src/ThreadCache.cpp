@@ -51,8 +51,8 @@ void ThreadCache::deallocate(void *ptr, size_t size) {
 
   size_t newSize = ++freeListSize[index];
 
-  // 归还检查
-  if (newSize >= maxSize[index] * 2) {
+  // 归还检查 - 大幅提高阈值，减少跨线程内存流动
+  if (newSize >= maxSize[index] * 4) {
     returnToCentralCache(freeList[index], size);
   }
 }
@@ -76,9 +76,9 @@ void *ThreadCache::fetchFromCentralCache(size_t index) {
   size_t size = (index + 1) * ALIGNMENT;
   // 计算批量数量
   size_t batchNum = maxSize[index];
-  // 慢启动：每次Miss，下一次申请的数量就多一点
+  // 慢启动：每次Miss，增加更多
   if (maxSize[index] < getBatchNum(size)) {
-    maxSize[index] += 2;
+    maxSize[index] += 4;
   }
 
   // 从中心缓存中获取内存块
@@ -153,21 +153,15 @@ void ThreadCache::returnToCentralCache(void *start, size_t size) {
   }
 }
 
-// 计算获取批量数
-// 修改ThreadCache::getBatchNum函数
+// 计算获取批量数 - 针对多线程优化，平衡内存占用和锁竞争
 size_t ThreadCache::getBatchNum(size_t size) {
-  // 优化批量获取策略 - 减少从CentralCache获取的频率
-  if (size <= 32)
-    return 128;
-  else if (size <= 64)
-    return 64;
+  if (size <= 64)
+    return 20;   // 64B * 20 = 1.25KB
   else if (size <= 128)
-    return 32;
+    return 12;   // 128B * 12 = 1.5KB
   else if (size <= 256)
-    return 16;
-  else if (size <= 512)
     return 8;
-  else if (size <= 1024)
+  else if (size <= 512)
     return 4;
   else
     return 2;

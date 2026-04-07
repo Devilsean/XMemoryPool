@@ -84,47 +84,26 @@ public:
 private:
   PageCache() = default;
   ~PageCache() {
-    // 清理还在桶里的物理内存（对于被CentralCache拿走物理内存的，随进程销毁即可）
+    // 释放 spanLists 中所有空闲 Span 的物理内存和结构体
     for (size_t i = 0; i < MAX_PAGES; ++i) {
       Span *cur = spanLists[i].PopFront();
       while (cur) {
-        // 将未使用的物理内存还给系统
         void *ptr = (void *)(cur->pageId << PAGE_SHIFT);
         systemFree(ptr, cur->numPages);
-
-        // 这里绝对不要free(cur)，把它留给第二步统一清理！ 否则会导致 Double
-        // Free 崩溃
+        cur->~Span();
+        std::free(cur);
         cur = spanLists[i].PopFront();
-      }
-    }
-
-    // 终极清扫，通过基数树(RadixTree)找出所有遗落在外的 Span 并释放
-    uintptr_t lastFreedSpan = 0;
-
-    // 遍历整个 20 位页号空间 (1 << 20)
-    for (size_t i = 0; i < (1 << 20); ++i) {
-      // 从户口本查出当前页对应的 Span
-      uintptr_t currentSpan = reinterpret_cast<uintptr_t>(idSpanMap.get(i));
-
-      // 如果查到了 Span，并且它不是我们上一次刚刚释放的那个（防重复释放）
-      if (currentSpan != 0 && currentSpan != lastFreedSpan) {
-        lastFreedSpan = currentSpan; // 记录下来，因为一个 Span 会占据连续几页
-
-        Span *spanToFree = reinterpret_cast<Span *>(currentSpan);
-        spanToFree->~Span();   // 显式析构
-        std::free(spanToFree); // 彻底回收
       }
     }
   }
 
-private:
   // 按页数分类的空闲链表数组。下标 1~128
   // 比如 spanLists[8] 挂的都是 8 页大小的空闲 Span
   SpanList spanLists[MAX_PAGES];
 
   // 基数树：页号 -> Span* 的映射
   // 用于回收内存时，通过页号快速找 Span，以及找相邻页号进行合并
-  RadixTree<20> idSpanMap;
+  RadixTree<> idSpanMap;
 
   std::mutex pageMtx; // 全局锁（因为合并操作涉及多个 SpanList）
 };

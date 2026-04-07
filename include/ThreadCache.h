@@ -14,15 +14,11 @@ public:
     static thread_local ThreadCache instance;
     static thread_local bool initialized = false;
 
-    if (!initialized) {
+      if (!initialized) {
       initialized = true;
-      // 针对每个规格的桶进行差异化初始化
       for (size_t i = 0; i < FREE_LIST_SIZE; ++i) {
         size_t size = (i + 1) * ALIGNMENT;
-        // 初始值 = min(起步性能价, 该规格的硬上限)
-        // 这样小对象初始是 8，大对象初始就是 2（符合 getBatchNum 设定）
-        instance.maxSize[i] =
-            std::min(static_cast<size_t>(8), instance.getBatchNum(size));
+        instance.maxSize[i] = instance.getBatchNum(size) * 2; // 初始容量翻倍
       }
     }
     return &instance;
