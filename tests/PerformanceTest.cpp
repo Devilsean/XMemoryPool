@@ -54,8 +54,8 @@ public:
   // 单线程小对象压力测试
   static void testSmallAllocation() {
     constexpr size_t NUM_ALLOCS = 500000; // 增加样本量
-    constexpr size_t SMALL_SIZE = 32;
-    printHeader("Small Allocation (Fixed 32B)");
+    constexpr size_t SMALL_SIZE = 8;      // 固定小对象大小
+    printHeader("Small Allocation (Fixed 8B)");
 
     auto runTest = [&](auto allocFunc, auto deallocFunc,
                        const std::string &name) {
@@ -84,9 +84,9 @@ public:
             [](void *p, size_t) { ::operator delete(p); }, "System Malloc");
   }
 
-  // 多线程高并发测试（修正了随机数瓶颈）
+  // 多线程高并发测试
   static void testMultiThreaded() {
-    constexpr size_t NUM_THREADS = 32;
+    constexpr size_t NUM_THREADS = 16;
     constexpr size_t ALLOCS_PER_THREAD = 100000;
     printHeader("Multi-threaded (Mixed 8-512B)");
 
@@ -142,7 +142,7 @@ public:
     runMulti(false, "System Malloc");
   }
 
-  // 4. 单线程混合大小测试 (补全)
+  // 4. 单线程混合大小测试
   static void testMixedSizes() {
     constexpr size_t NUM_ALLOCS = 300000;
     const size_t SIZES[] = {16, 32, 64, 128, 256, 512, 1024, 2048};
